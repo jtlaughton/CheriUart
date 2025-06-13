@@ -139,7 +139,7 @@ typedef struct uart_soft_c {
     void* __capability sealing_key;
     sealed_cap_state_t cap_state;
 
-} uart_soft_c_t;
+} uart_softc_t;
 
 #define DR_DATA_MASK    (0xFFu)
 

@@ -1,4 +1,6 @@
 #include "uart.h"
+
+#include <contrib/dev/acpica/include/acpi.h>
 #include <dev/acpica/acpivar.h>
 
 #define REFCLOCK 24000000
@@ -16,7 +18,7 @@ static int uart_acpi_detach(device_t dev);
 // ACPI-compatible hardware IDs for the PL011 UART
 static char *uart_ids[] = { "ARMH0011", NULL };
 
-static int check_cap_token(uart_soft_c_t* sc, void* __capability cap_token){
+static int check_cap_token(uart_softc_t* sc, void* __capability cap_token){
     if(sc->cap_state.sealed_cap == NULL){
         return EINVAL;
     }
@@ -58,9 +60,15 @@ uart_open(struct cdev *dev, int flags, int devtype, struct thread *td)
         return ENXIO;
     }
 
-    UARt_UNLOCK(sc);
+    UART_UNLOCK(sc);
 	uprintf("UART: device opened\n");
 	return (0);
+}
+
+// probably will be expanded in the future to revoke all caps in the vm object and such
+static void revoke_cap_token(uart_softc_t* sc){
+    sc->cap_state.original_cap = NULL;
+    sc->cap_state.sealed_cap = NULL;
 }
 
 static int
@@ -79,14 +87,8 @@ uart_close(struct cdev *dev, int flags, int devtype, struct thread *td)
 	return (0);
 }
 
-// probably will be expanded in the future to revoke all caps in the vm object and such
-static void revoke_cap_token(uart_soft_c_t* sc){
-    sc->cap_state.original_cap = NULL;
-    sc->cap_state.sealed_cap = NULL;
-}
-
 static int
-create_our_cdev(uart_soft_c_t* sc){
+create_our_cdev(uart_softc_t* sc){
     sc->cdev = make_dev(&uart_cdevsw, 0, UID_ROOT, GID_WHEEL,
         0600, "uart-cheri");
     if(sc->cdev == NULL){
@@ -96,7 +98,7 @@ create_our_cdev(uart_soft_c_t* sc){
     sc->cdev->si_drv1 = sc;
 
     // allocate shared mem using VM system instead of contigmalloc
-    sc->page = (uart_registers* __kerncap)malloc(sizeof(uart_registers), M_DEVBUF, M_WAITOK | M_ZERO);
+    sc->page = (uart_buffers_t* __kerncap)malloc(sizeof(uart_registers), M_DEVBUF, M_WAITOK | M_ZERO);
     if(sc->page == NULL){
         destroy_dev(sc->cdev);
         device_printf(sc->dev, "Failed to create shared mem\n");
@@ -248,7 +250,7 @@ static int uart_mmap_single_extra(struct cdev *cdev, vm_ooffset_t *offset, vm_si
 	return (0);
 }
 
-uart_error uart_configure(uart_config* config) {
+static uart_error uart_configure(uart_softc_t* sc, uart_config* config) {
     /* Validate config */
     if (config->data_bits < 5u || config->data_bits > 8u) {
         return UART_INVALID_ARGUMENT_WORDSIZE;
@@ -265,13 +267,24 @@ uart_error uart_configure(uart_config* config) {
     while (sc->registers->FR & FR_BUSY);
     sc->registers->LCRH &= ~LCRH_FEN;
 
-    /* Set baudrate */
-    double intpart, fractpart;
-    double baudrate_divisor = (double)refclock / (16u * config->baudrate);
-    fractpart = modf(baudrate_divisor, &intpart);
+    /* Set baudrate using integer arithmetic to avoid floating point in kernel. */
+    uint64_t uartclk = REFCLOCK;
+    uint32_t bauddiv = 16 * config->baudrate;
+    uint32_t ibrd, fbrd;
+    
+    ibrd = uartclk / bauddiv;
+    /*
+     * FBRD = round(fractional_part * 64)
+     * fractional_part = (uartclk / bauddiv) - ibrd
+     * = (uartclk % bauddiv) / bauddiv
+     * So, FBRD = round(((uartclk % bauddiv) / bauddiv) * 64)
+     * Using integer rounding: round(x/y) = (x + y/2) / y
+     */
+    fbrd = (((uartclk % bauddiv) * 64) + (bauddiv / 2)) / bauddiv;
 
-    sc->registers->IBRD = (uint16_t)intpart;
-    sc->registers->FBRD = (uint8_t)((fractpart * 64u) + 0.5);
+    sc->baudrate = config->baudrate;
+    sc->registers->IBRD = (uint16_t)ibrd;
+    sc->registers->FBRD = (uint8_t)fbrd;
 
     uint32_t lcrh = 0u;
 
@@ -321,18 +334,18 @@ uart_error uart_configure(uart_config* config) {
     return UART_OK;
 }
 
-void uart_putchar(char c) {
+static void uart_putchar(uart_softc_t* sc, char c) {
     while (sc->registers->FR & FR_TXFF);
     sc->registers->DR = c;
 }
 
-void uart_write(uart_soft_c_t* sc, tx_uart_req_t* req) {
+static void uart_write(uart_softc_t* sc, tx_uart_req_t* req) {
     for(size_t i = 0; i < req->length; i++){
-        uart_putchar(sc->page->transmit_buffer[i]);
+        uart_putchar(sc,sc->page->transmit_buffer[i]);
     }
 }
 
-uart_error uart_getchar(uart_soft_c_t* sc, char* c) {
+static uart_error uart_getchar(uart_softc_t* sc, char* c) {
     if (sc->registers->FR & FR_RXFE) {
         return UART_NO_DATA;
     }
@@ -346,7 +359,7 @@ uart_error uart_getchar(uart_soft_c_t* sc, char* c) {
     return UART_OK;
 }
 
-int read_until(uart_soft_c_t* sc, rx_uart_req_t* req){
+static int read_until(uart_softc_t* sc, rx_uart_req_t* req){
     size_t ammount_read = 0;
     while(ammount_read < req->length_wanted){
         char output_char;
@@ -356,7 +369,7 @@ int read_until(uart_soft_c_t* sc, rx_uart_req_t* req){
             uart_error error = uart_getchar(sc, &output_char);
             if ((error == UART_RECEIVE_ERROR) ||
                 (error == UART_NO_DATA)){
-                DELAY(1000000 / (sc->baudrate / 8))
+                DELAY(1000000 / (sc->baudrate / 8));
                 continue;
             }
             else{
@@ -387,7 +400,7 @@ uart_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
     }
 
     uprintf("UART: Cap cast\n");
-    uart_header_req* header_req = (uart_header_req_t*)addr;
+    uart_header_req_t* header_req = (uart_header_req_t*)addr;
     uart_softc_t *sc = dev->si_drv1;
 
     uprintf("UART: Null check\n");
@@ -415,7 +428,7 @@ uart_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 
             uint64_t max_len = PAGE_SIZE / 2;
 
-            if(user_req->length_wanted > max_len){
+            if(user_req_rx->length_wanted > max_len){
                 device_printf(sc->dev, "User Wants Too Many Bytes\n");
                 UART_UNLOCK(sc);
                 return EINVAL;
@@ -462,8 +475,17 @@ uart_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
 static int
 uart_acpi_probe(device_t dev)
 {
-    if (ACPI_MATCH_PNP_INFO(dev, uart_ids) == NULL)
-        return (ENXIO);
+    ACPI_HANDLE h;
+
+	if ((h = acpi_get_handle(dev)) == NULL)
+		return ENXIO;
+
+    for (size_t i = 0; uart_ids[i] != NULL; i++) {
+        if (acpi_MatchHid(h, uart_ids[i])) {
+            device_set_desc(dev, "PL011 Cheri-aware UART");
+            return (BUS_PROBE_DEFAULT);
+        }
+    }
     
     device_set_desc(dev, "PL011 Cheri-aware UART");
     return (BUS_PROBE_DEFAULT);
