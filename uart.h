@@ -84,7 +84,7 @@ static struct cdev_pager_ops uart_cdev_pager_ops = {
 };
 
 static struct cdevsw uart_cdevsw = {
-	.d_name		= "uart-cheri",
+	.d_name		= "uart-chert",
 	.d_version	= D_VERSION,
 	.d_open		= uart_open,
 	.d_close	= uart_close,
