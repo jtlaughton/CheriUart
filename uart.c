@@ -477,6 +477,8 @@ uart_acpi_probe(device_t dev)
 {
     ACPI_HANDLE h;
 
+    uprintf("UART: Probe\n");
+
 	if ((h = acpi_get_handle(dev)) == NULL)
 		return ENXIO;
 
