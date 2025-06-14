@@ -1,6 +1,9 @@
  #ifndef UART_H
  #define UART_H
 
+ // based on this file: https://github.com/umanovskis/baremetal-arm/blob/master/src/06_uart/src/uart_pl011.c
+ // failed attempt but hey why not
+
  #include <sys/systm.h>
  #include <sys/bus.h>
  #include <sys/kernel.h>
@@ -120,9 +123,9 @@ typedef struct sealed_cap_state {
 } sealed_cap_state_t;
 
 typedef struct uart_soft_c {
-    device_t dev;                           // Device handle
+    device_t dev;                           
     int mem_rid;
-    struct resource* mem_res;               // Memory resource
+    struct resource* mem_res;               
     bool device_attached;
     
     uart_registers* registers;

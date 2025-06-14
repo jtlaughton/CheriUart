@@ -469,9 +469,6 @@ uart_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flags,
     return error;
 }
 
-/**
- * @brief Probe for a PL011 UART device on the ACPI bus.
- */
 static int
 uart_acpi_probe(device_t dev)
 {
@@ -491,16 +488,12 @@ uart_acpi_probe(device_t dev)
     return (BUS_PROBE_DEFAULT);
 }
 
-/**
- * @brief Attach the driver to the UART device.
- */
 static int
 uart_acpi_attach(device_t dev)
 {
     uart_softc_t *sc = device_get_softc(dev);
     sc->dev = dev;
 
-    // Allocate memory-mapped I/O resource for UART registers
     int rid = 0;
     sc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid, RF_ACTIVE);
     if (sc->mem_res == NULL) {
@@ -512,7 +505,6 @@ uart_acpi_attach(device_t dev)
 
     UART_LOCK_INIT(sc);
 
-    // Create a unique sealing key for this device instance
     sc->sealing_key = create_sealing_key(device_get_unit(dev));
     if (sc->sealing_key == NULL) {
         device_printf(dev, "Failed to create sealing key.\n");
@@ -521,7 +513,6 @@ uart_acpi_attach(device_t dev)
         return ENXIO;
     }
 
-    // Create the character device and allocate shared memory page
     if (create_our_cdev(sc) != 0) {
         device_printf(dev, "Failed to create character device.\n");
         bus_release_resource(dev, SYS_RES_MEMORY, rid, sc->mem_res);
@@ -529,7 +520,6 @@ uart_acpi_attach(device_t dev)
         return ENXIO;
     }
 
-    // Set a default configuration
     uart_config config = {
         .baudrate = 115200,
         .data_bits = 8,
@@ -542,9 +532,6 @@ uart_acpi_attach(device_t dev)
     return 0;
 }
 
-/**
- * @brief Detach the driver from the UART device.
- */
 static int
 uart_acpi_detach(device_t dev)
 {
@@ -568,9 +555,7 @@ uart_acpi_detach(device_t dev)
     return 0;
 }
 
-// Device method table
 static device_method_t uart_methods[] = {
-    // Device interface
     DEVMETHOD(device_probe,     uart_acpi_probe),
     DEVMETHOD(device_attach,    uart_acpi_attach),
     DEVMETHOD(device_detach,    uart_acpi_detach),
@@ -578,13 +563,11 @@ static device_method_t uart_methods[] = {
     DEVMETHOD_END
 };
 
-// Driver definition
 static driver_t uart_acpi_driver = {
     "uart-cheri",
     uart_methods,
     sizeof(uart_softc_t),
 };
 
-// Register the driver with the system
 DRIVER_MODULE(uart_cheri, acpi, uart_acpi_driver, 0, 0);
 MODULE_VERSION(uart_cheri, 1);
